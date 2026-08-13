@@ -32,19 +32,21 @@ RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ))
 
 import protocol as P  # noqa: E402
+from coordinator import stats  # noqa: E402
 
 # ------------------------------------------------------------------
 # Configuración de la tarea global a distribuir.
 # ------------------------------------------------------------------
 # Buscamos el número cuyo SHA-256 coincide con OBJETIVO. Lo fijamos a un
 # número conocido para que la corrida sea reproducible en la demo.
-NUMERO_SECRETO = 733_219
+NUMERO_SECRETO = 8_450_137
 from worker.tasks import hash_de  # noqa: E402
 
 OBJETIVO = hash_de(NUMERO_SECRETO)
 
-RANGO_TOTAL = 1_000_000   # revisamos del 0 al 1.000.000
-NUM_CHUNKS = 20           # partido en 20 pedazos
+RANGO_TOTAL = 12_000_000  # revisamos del 0 al 12.000.000
+NUM_CHUNKS = 12           # partido en 12 pedazos (cada uno tarda ~1-3s,
+                          # suficiente para capturar varias lecturas de métricas)
 TAM_CHUNK = RANGO_TOTAL // NUM_CHUNKS
 
 
@@ -70,6 +72,7 @@ class Estado:
         self.resultados = []            # RESULTs recibidos
         self.encontrado = None          # número hallado, si aparece
         self.total_chunks = len(self.cola)
+        self.corrida_id = None          # id de la corrida en la base de datos
 
     async def siguiente_chunk(self):
         """Entrega el próximo chunk de la cola, o None si ya no hay."""
@@ -111,6 +114,11 @@ async def ws(websocket: WebSocket):
                     "cpu": data.get("cpu"),
                     "chunks_hechos": 0,
                 }
+                # La primera vez que se conecta un worker, abrimos la corrida
+                # en la base de datos.
+                if estado.corrida_id is None:
+                    estado.corrida_id = stats.nueva_corrida(OBJETIVO, estado.total_chunks)
+                    print(f"[COORD] Corrida #{estado.corrida_id} registrada en la base de datos")
                 print(f"[COORD] Worker registrado: {nombre} "
                       f"({data.get('os')}, {data.get('cpu')} núcleos)")
                 await websocket.send_text(json.dumps(
@@ -120,6 +128,13 @@ async def ws(websocket: WebSocket):
                 ))
                 # Le mandamos su primer chunk de inmediato.
                 await asignar(websocket, nombre)
+
+            # --- METRICS: lectura de CPU/RAM en vivo mientras procesa ---
+            elif tipo == P.METRICS:
+                print(f"[METRICS] {data.get('nombre')} chunk#{data.get('chunk_id')} "
+                      f"| CPU proc {data.get('cpu_proc')}% "
+                      f"| CPU sys {data.get('cpu_sys')}% "
+                      f"| RAM {data.get('ram_mb')} MB")
 
             # --- RESULT: el worker terminó un chunk ---
             elif tipo == P.RESULT:
@@ -133,6 +148,9 @@ async def ws(websocket: WebSocket):
                       f"en {tiempo:.3f}s{marca}")
                 if hallazgo is not None:
                     estado.encontrado = hallazgo
+                # Guardamos el resultado de este chunk en la base de datos.
+                so_worker = estado.workers[nombre]["os"]
+                stats.guardar_resultado(estado.corrida_id, nombre, so_worker, data)
                 # Le damos el siguiente chunk (o le avisamos que no hay más).
                 await asignar(websocket, nombre)
 
@@ -169,4 +187,15 @@ def resumen():
         print(f"  {nombre:<20} {info['chunks_hechos']} chunks")
     if estado.encontrado is not None:
         print(f"\n  Número secreto encontrado: {estado.encontrado}")
+
+    # Resumen agregado por sistema operativo, leído desde la base de datos.
+    filas = stats.resumen_por_so(estado.corrida_id)
+    if filas:
+        print("\n  Comparativa por sistema operativo:")
+        print(f"  {'SO':<10}{'chunks':>8}{'t.prom(s)':>12}{'CPU proc%':>12}{'RAM MB':>10}")
+        print("  " + "-" * 50)
+        for so, chunks, t_prom, cpu_prom, ram_prom in filas:
+            so_txt = so or "?"
+            print(f"  {so_txt:<10}{chunks:>8}{t_prom:>12}{cpu_prom:>12}{ram_prom:>10}")
+    print(f"\n  Datos guardados en: os_grid.db (corrida #{estado.corrida_id})")
     print("=" * 52 + "\n")
