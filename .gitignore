@@ -1,6 +1,18 @@
+# Entorno Python
 .venv/
 __pycache__/
+*.pyc
+
+# Base de datos de métricas (Fase 4)
 *.db
+
+# Frontend (Fase 6)
 node_modules/
 dist/
+
+# Imágenes de VM (si acaso)
 *.qcow2
+
+# Sistema
+.DS_Store
+Thumbs.db
