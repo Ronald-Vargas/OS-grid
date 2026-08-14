@@ -66,11 +66,16 @@ export class GridService {
     this.nodos.set(mapa);
     this.mision.update(m => ({ ...m, total: ev.chunks_totales, completados: ev.completados }));
     const n = (ev.workers ?? []).length;
-    if (!ev.arrancado && n >= ev.min_workers) {
+    const fase = ev.fase ?? "esperando";
+    if (fase === "listo") {
       this.esperando.set({ activo: false, conectados: n, minimo: ev.min_workers });
       this.configurando.set(true);
+    } else if (fase === "esperando") {
+      this.esperando.set({ activo: true, conectados: n, minimo: ev.min_workers });
+      this.configurando.set(false);
     } else {
-      this.esperando.set({ activo: !ev.arrancado, conectados: n, minimo: ev.min_workers });
+      this.esperando.set({ activo: false, conectados: n, minimo: ev.min_workers });
+      this.configurando.set(false);
     }
   }
 

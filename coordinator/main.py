@@ -1,13 +1,5 @@
 """
-Coordinador de OS Grid — Fases 1-6+
-
-Cambios respecto a la versión anterior:
-  - NO arranca automático al llegar el MIN_WORKERS-ésimo worker.
-  - Espera que el dashboard envíe start_mission con tipo+intensidad.
-  - Soporta tres tipos de tarea: hash, sort, primos.
-  - Soporta tres intensidades: ligero, normal, pesado.
-  - Se auto-reinicia después de cada corrida (3 s de gracia).
-  - El canal /ws/dashboard ahora procesa mensajes entrantes.
+Coordinador de OS Grid — versión estable (Fases 1-6 + configurador)
 """
 
 import asyncio
@@ -27,11 +19,9 @@ import protocol as P
 from coordinator import stats
 from worker.tasks import hash_de
 
-# ── Número secreto (SHA-256) ─────────────────────────────────────────────────
 NUMERO_SECRETO = 8_450_137
 OBJETIVO_HASH  = hash_de(NUMERO_SECRETO)
 
-# ── Configuraciones por tipo × intensidad ────────────────────────────────────
 CONFIGURACIONES = {
     "hash": {
         "ligero": {"rango": 3_000_000,  "chunks": 6},
@@ -53,63 +43,46 @@ CONFIGURACIONES = {
 MIN_WORKERS = 3
 
 
-# ── Construcción de la cola según tipo ───────────────────────────────────────
-
 def construir_cola(tipo: str, intensidad: str) -> list:
     cfg = CONFIGURACIONES[tipo][intensidad]
-    n   = cfg["chunks"]
+    n = cfg["chunks"]
     cola = []
-
     if tipo in ("hash", "primos"):
-        rango   = cfg["rango"]
-        tam_ch  = rango // n
+        rango = cfg["rango"]
+        tam_ch = rango // n
         for i in range(n):
-            cola.append({
-                "id": i,
-                "tipo_tarea": tipo,
-                "inicio": i * tam_ch,
-                "fin":    (i + 1) * tam_ch,
-                "tam": 0,
-            })
-
+            cola.append({"id": i, "tipo_tarea": tipo,
+                         "inicio": i * tam_ch, "fin": (i + 1) * tam_ch, "tam": 0})
     elif tipo == "sort":
         tam = cfg["tam"]
         for i in range(n):
-            cola.append({
-                "id": i,
-                "tipo_tarea": tipo,
-                "inicio": 0,
-                "fin": 0,
-                "tam": tam,
-            })
-
+            cola.append({"id": i, "tipo_tarea": tipo,
+                         "inicio": 0, "fin": 0, "tam": tam})
     return cola
 
 
-# ── Estado global ─────────────────────────────────────────────────────────────
-
 class Estado:
     def __init__(self):
-        self.tipo_tarea  = "hash"
-        self.intensidad  = "normal"
-        self.cola        = []
-        self.lock        = asyncio.Lock()
-        self.workers     = {}          # nombre → {os, cpu, chunks_hechos}
-        self.workers_ws  = {}          # nombre → WebSocket (para enviar RESET)
-        self.resultados  = []
-        self.encontrado  = None
+        self.tipo_tarea   = "hash"
+        self.intensidad   = "normal"
+        self.cola         = []
+        self.lock         = asyncio.Lock()
+        self.workers      = {}     # nombre -> {os, cpu, chunks_hechos, ws}
+        self.resultados   = []
+        self.encontrado   = None
         self.total_chunks = 0
-        self.corrida_id  = None
-        self.dashboards  = []
-        self.arranque    = asyncio.Event()  # se dispara en start_mission
+        self.corrida_id   = None
+        self.dashboards   = []
+        # Estado global de la misión: "esperando" | "listo" | "corriendo" | "completa"
+        self.fase         = "esperando"
 
     async def broadcast(self, evento: dict):
         muertos = []
-        for dash in self.dashboards:
+        for d in self.dashboards:
             try:
-                await dash.send_text(json.dumps(evento))
+                await d.send_text(json.dumps(evento))
             except Exception:
-                muertos.append(dash)
+                muertos.append(d)
         for d in muertos:
             if d in self.dashboards:
                 self.dashboards.remove(d)
@@ -119,20 +92,18 @@ class Estado:
             return self.cola.pop(0) if self.cola else None
 
     def reset(self):
-        """Reinicia el estado de misión (mantiene workers conectados)."""
+        """Deja el estado listo para una nueva corrida (mantiene workers)."""
         self.cola         = []
         self.resultados   = []
         self.encontrado   = None
         self.total_chunks = 0
         self.corrida_id   = None
-        self.arranque     = asyncio.Event()
+        self.fase         = "listo" if len(self.workers) >= MIN_WORKERS else "esperando"
         for w in self.workers.values():
             w["chunks_hechos"] = 0
 
 
 estado = Estado()
-
-# ── App FastAPI ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="OS Grid Coordinator")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
@@ -142,7 +113,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 @app.get("/api/status")
 def api_status():
     return {
-        "servicio": "OS Grid Coordinator",
+        "fase": estado.fase,
         "tipo_tarea": estado.tipo_tarea,
         "intensidad": estado.intensidad,
         "chunks_totales": estado.total_chunks,
@@ -151,7 +122,7 @@ def api_status():
     }
 
 
-# ── WebSocket de workers ──────────────────────────────────────────────────────
+# ── WebSocket de workers ─────────────────────────────────────────────────────
 
 @app.websocket("/ws")
 async def ws_worker(websocket: WebSocket):
@@ -163,47 +134,39 @@ async def ws_worker(websocket: WebSocket):
             data  = json.loads(crudo)
             tipo  = data.get("type")
 
-            # ── REGISTER ──────────────────────────────────────────────────
             if tipo == P.REGISTER:
                 nombre = data.get("nombre", "desconocido")
-                estado.workers[nombre]    = {
+                estado.workers[nombre] = {
                     "os": data.get("os"),
                     "cpu": data.get("cpu"),
                     "chunks_hechos": 0,
+                    "ws": websocket,
                 }
-                estado.workers_ws[nombre] = websocket
-
-                if estado.corrida_id is None and estado.cola:
-                    # Corrida ya iniciada (worker tardó en conectarse): crear corrida si no existe
-                    pass
-
                 n = len(estado.workers)
                 print(f"[COORD] Worker registrado: {nombre} ({data.get('os')}) — {n}/{MIN_WORKERS}")
 
                 await websocket.send_text(json.dumps(
-                    P.msg(P.REGISTERED,
-                          objetivo=OBJETIVO_HASH,
+                    P.msg(P.REGISTERED, objetivo=OBJETIVO_HASH,
                           chunks_totales=estado.total_chunks)
                 ))
 
-                if n >= MIN_WORKERS and not estado.arranque.is_set():
-                    await estado.broadcast({
-                        "type": "ready_to_configure",
-                        "conectados": n,
-                        "minimo": MIN_WORKERS,
-                    })
+                # Avisar al dashboard del nuevo worker
+                await estado.broadcast({
+                    "type": "worker_join",
+                    "nombre": nombre, "os": data.get("os"),
+                    "cpu": data.get("cpu"),
+                    "chunks_totales": estado.total_chunks,
+                })
+
+                # Si estamos en fase "corriendo", darle chunks al vuelo
+                if estado.fase == "corriendo":
+                    await asignar(websocket, nombre)
                 else:
-                    await estado.broadcast({
-                        "type": "waiting",
-                        "conectados": n,
-                        "minimo": MIN_WORKERS,
-                        "faltantes": max(0, MIN_WORKERS - n),
-                    })
+                    # Actualizar la fase global según cuántos workers hay
+                    if n >= MIN_WORKERS and estado.fase == "esperando":
+                        estado.fase = "listo"
+                    await avisar_fase()
 
-                await estado.arranque.wait()
-                await asignar(websocket, nombre)
-
-            # ── METRICS ───────────────────────────────────────────────────
             elif tipo == P.METRICS:
                 await estado.broadcast({
                     "type": "metrics",
@@ -214,11 +177,10 @@ async def ws_worker(websocket: WebSocket):
                     "ram_mb":   data.get("ram_mb"),
                 })
 
-            # ── RESULT ────────────────────────────────────────────────────
             elif tipo == P.RESULT:
-                cid     = data.get("chunk_id")
+                cid = data.get("chunk_id")
                 hallazgo = data.get("encontrado")
-                tiempo  = data.get("tiempo", 0)
+                tiempo = data.get("tiempo", 0)
 
                 estado.resultados.append(data)
                 estado.workers[nombre]["chunks_hechos"] += 1
@@ -233,11 +195,8 @@ async def ws_worker(websocket: WebSocket):
 
                 await estado.broadcast({
                     "type": "chunk_done",
-                    "nombre": nombre,
-                    "os": so,
-                    "chunk_id": cid,
-                    "tiempo": tiempo,
-                    "encontrado": hallazgo,
+                    "nombre": nombre, "os": so, "chunk_id": cid,
+                    "tiempo": tiempo, "encontrado": hallazgo,
                     "chunks_hechos": estado.workers[nombre]["chunks_hechos"],
                     "completados": len(estado.resultados),
                     "total": estado.total_chunks,
@@ -245,70 +204,73 @@ async def ws_worker(websocket: WebSocket):
                 await asignar(websocket, nombre)
 
     except WebSocketDisconnect:
-        if nombre:
+        if nombre and nombre in estado.workers:
             estado.workers.pop(nombre, None)
-            estado.workers_ws.pop(nombre, None)
             print(f"[COORD] Worker desconectado: {nombre}")
+            # Si estábamos listos pero se cayó uno, volver a esperando
+            if estado.fase == "listo" and len(estado.workers) < MIN_WORKERS:
+                estado.fase = "esperando"
+            await avisar_fase()
 
 
-# ── Asignación de chunk ───────────────────────────────────────────────────────
+# ── Asignación y flujo ───────────────────────────────────────────────────────
 
-async def asignar(websocket: WebSocket, nombre: str):
+async def asignar(ws: WebSocket, nombre: str):
     chunk = await estado.siguiente_chunk()
     if chunk is None:
-        await websocket.send_text(json.dumps(P.msg(P.NO_MORE)))
-        if len(estado.resultados) == estado.total_chunks:
-            resumen_consola()
+        try:
+            await ws.send_text(json.dumps(P.msg(P.NO_MORE)))
+        except Exception:
+            pass
+        # ¿Terminó todo?
+        if estado.fase == "corriendo" and len(estado.resultados) == estado.total_chunks:
+            estado.fase = "completa"
             await broadcast_final()
+            # Reset inmediato para próxima corrida
+            estado.reset()
+            await avisar_fase()
         return
 
-    print(f"[COORD] → {nombre}: chunk #{chunk['id']} "
-          f"tipo={chunk['tipo_tarea']} [{chunk['inicio']},{chunk['fin']}) tam={chunk['tam']}")
-
-    await websocket.send_text(json.dumps(P.msg(
+    print(f"[COORD] → {nombre}: chunk #{chunk['id']} tipo={chunk['tipo_tarea']}")
+    await ws.send_text(json.dumps(P.msg(
         P.TASK_ASSIGN,
-        chunk_id    = chunk["id"],
-        tipo_tarea  = chunk["tipo_tarea"],
-        inicio      = chunk["inicio"],
-        fin         = chunk["fin"],
-        tam         = chunk["tam"],
-        objetivo    = OBJETIVO_HASH if chunk["tipo_tarea"] == "hash" else "",
+        chunk_id=chunk["id"], tipo_tarea=chunk["tipo_tarea"],
+        inicio=chunk["inicio"], fin=chunk["fin"], tam=chunk["tam"],
+        objetivo=OBJETIVO_HASH if chunk["tipo_tarea"] == "hash" else "",
     )))
 
 
-# ── Final de misión ───────────────────────────────────────────────────────────
+async def avisar_fase():
+    """Envía a los dashboards el estado actual (esperando / listo / corriendo)."""
+    n = len(estado.workers)
+    if estado.fase == "esperando":
+        await estado.broadcast({
+            "type": "waiting",
+            "conectados": n, "minimo": MIN_WORKERS,
+            "faltantes": max(0, MIN_WORKERS - n),
+        })
+    elif estado.fase == "listo":
+        await estado.broadcast({
+            "type": "ready_to_configure",
+            "conectados": n, "minimo": MIN_WORKERS,
+        })
+
 
 async def broadcast_final():
-    filas    = stats.resumen_por_so(estado.corrida_id)
-    por_so   = [{"so": so or "?", "chunks": chunks, "tiempo_prom": t,
-                 "cpu_prom": cpu, "ram_prom": ram}
-                for so, chunks, t, cpu, ram in filas]
-    por_nodo = [{"nombre": n, "os": i["os"], "chunks": i["chunks_hechos"]}
-                for n, i in estado.workers.items()]
+    filas = stats.resumen_por_so(estado.corrida_id)
+    por_so = [{"so": so or "?", "chunks": c, "tiempo_prom": t,
+               "cpu_prom": cpu, "ram_prom": ram}
+              for so, c, t, cpu, ram in filas]
     await estado.broadcast({
         "type": "mission_complete",
         "encontrado": estado.encontrado,
         "por_so": por_so,
-        "por_nodo": por_nodo,
         "corrida_id": estado.corrida_id,
     })
-    # Resetear INMEDIATAMENTE para que los workers que reconecten
-    # en ~3s encuentren el arranque limpio (sin disparar).
-    estado.reset()
-    print("[COORD] Estado reseteado. Esperando workers para nueva corrida.")
+    print(f"[COORD] Misión #{estado.corrida_id} completa. Reset para siguiente corrida.")
 
 
-def resumen_consola():
-    print("\n" + "=" * 52)
-    print(" MISIÓN COMPLETA")
-    for n, i in estado.workers.items():
-        print(f"  {n:<20} {i['chunks_hechos']} chunks")
-    if estado.encontrado:
-        print(f"\n  Número secreto: {estado.encontrado}")
-    print("=" * 52 + "\n")
-
-
-# ── WebSocket del dashboard ───────────────────────────────────────────────────
+# ── WebSocket del dashboard ──────────────────────────────────────────────────
 
 @app.websocket("/ws/dashboard")
 async def ws_dashboard(websocket: WebSocket):
@@ -319,12 +281,12 @@ async def ws_dashboard(websocket: WebSocket):
     # Snapshot inicial
     await websocket.send_text(json.dumps({
         "type": "snapshot",
+        "fase": estado.fase,
         "tipo_tarea": estado.tipo_tarea,
         "intensidad": estado.intensidad,
         "chunks_totales": estado.total_chunks,
         "completados": len(estado.resultados),
         "min_workers": MIN_WORKERS,
-        "arrancado": estado.arranque.is_set(),
         "workers": [
             {"nombre": n, "os": i["os"], "cpu": i["cpu"],
              "chunks_hechos": i["chunks_hechos"]}
@@ -348,30 +310,35 @@ async def ws_dashboard(websocket: WebSocket):
 
 
 async def iniciar_mision(tipo: str, intensidad: str):
-    """Configura y dispara la misión cuando el dashboard lo ordena."""
-    if estado.arranque.is_set():
-        print("[COORD] Ya hay una misión en curso, ignorando start_mission.")
+    """Arranca una misión: construye cola y asigna a todos los workers."""
+    if estado.fase != "listo":
+        print(f"[COORD] No se puede iniciar (fase={estado.fase})")
         return
 
     estado.tipo_tarea = tipo
     estado.intensidad = intensidad
-    estado.cola       = construir_cola(tipo, intensidad)
+    estado.cola = construir_cola(tipo, intensidad)
     estado.total_chunks = len(estado.cola)
     estado.corrida_id = stats.nueva_corrida(OBJETIVO_HASH, estado.total_chunks)
+    estado.fase = "corriendo"
 
-    print(f"[COORD] Iniciando misión: tipo={tipo} intensidad={intensidad} "
-          f"chunks={estado.total_chunks} corrida#{estado.corrida_id}")
+    print(f"[COORD] ▶ Misión iniciada: {tipo}/{intensidad} — {estado.total_chunks} chunks — corrida #{estado.corrida_id}")
 
     await estado.broadcast({
         "type": "mission_starting",
-        "tipo": tipo,
-        "intensidad": intensidad,
+        "tipo": tipo, "intensidad": intensidad,
         "chunks_totales": estado.total_chunks,
     })
-    estado.arranque.set()
+
+    # Repartir el primer chunk a cada worker
+    for nombre, info in list(estado.workers.items()):
+        try:
+            await asignar(info["ws"], nombre)
+        except Exception as e:
+            print(f"[COORD] Error al asignar a {nombre}: {e}")
 
 
-# ── Archivos estáticos (dashboard Angular) ────────────────────────────────────
+# ── Estáticos ────────────────────────────────────────────────────────────────
 
 _static = Path(__file__).resolve().parent / "static"
 if (_static / "index.html").exists():
@@ -379,6 +346,4 @@ if (_static / "index.html").exists():
 else:
     @app.get("/", response_class=HTMLResponse)
     def sin_dashboard():
-        return ("<h2>OS Grid</h2>"
-                "<p>Coordinador corriendo. Sin dashboard compilado.</p>"
-                "<p><a href='/api/status'>/api/status</a></p>")
+        return "<h2>OS Grid</h2><p>Sin dashboard compilado.</p>"
