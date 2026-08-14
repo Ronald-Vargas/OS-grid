@@ -30,6 +30,23 @@
     </div>
   </section>
 
+  <!-- ================= PANTALLA DE ESPERA ================= -->
+  @if (esperando().activo && !mision().completa) {
+    <section class="waiting-panel">
+      <div class="waiting-icon">⏳</div>
+      <div class="waiting-title">Esperando workers...</div>
+      <div class="waiting-count">
+        {{ esperando().conectados }} / {{ esperando().minimo }} equipos conectados
+      </div>
+      <div class="waiting-dots">
+        @for (n of [1,2,3]; track n) {
+          <span class="dot" [class.on]="n <= esperando().conectados"></span>
+        }
+      </div>
+      <div class="waiting-hint">La misión arranca automáticamente cuando se conecten todos.</div>
+    </section>
+  }
+
   <!-- ================= TARJETAS POR NODO ================= -->
   <section class="grid">
     @for (nodo of nodos(); track trackNodo($index, nodo)) {

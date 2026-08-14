@@ -146,3 +146,23 @@
   .topbar { flex-direction: column; gap: 12px; align-items: stretch; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ---------- pantalla de espera ---------- */
+.waiting-panel {
+  background: var(--panel); border: 1px solid var(--borde);
+  border-radius: 12px; padding: 48px 20px; margin-bottom: 16px;
+  text-align: center;
+}
+.waiting-icon { font-size: 40px; margin-bottom: 12px; }
+.waiting-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+.waiting-count {
+  font-family: var(--mono); font-size: 28px; font-weight: 700;
+  color: var(--acento); margin-bottom: 20px;
+}
+.waiting-dots { display: flex; justify-content: center; gap: 12px; margin-bottom: 16px; }
+.waiting-dots .dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #e4e7ec; transition: background .3s;
+}
+.waiting-dots .dot.on { background: var(--ok); box-shadow: 0 0 0 4px rgba(22,163,74,.15); }
+.waiting-hint { font-size: 13px; color: var(--texto-suave); }

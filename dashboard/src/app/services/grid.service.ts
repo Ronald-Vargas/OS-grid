@@ -48,6 +48,8 @@ export class GridService {
     completa: false, encontrado: null, porSo: [],
     completados: 0, total: 0,
   });
+  // Estado de espera antes de que arranque la misión
+  readonly esperando = signal({ activo: false, conectados: 0, minimo: 0 });
 
   private ws?: WebSocket;
   private readonly MAX_HISTORIAL = 30; // puntos que guarda la gráfica
@@ -72,6 +74,9 @@ export class GridService {
       case 'snapshot':
         this.aplicarSnapshot(ev);
         break;
+      case 'waiting':
+        this.esperando.set({ activo: true, conectados: ev.conectados, minimo: ev.minimo });
+        break;
       case 'worker_join':
         this.agregarNodo(ev);
         break;
@@ -88,6 +93,15 @@ export class GridService {
   }
 
   private aplicarSnapshot(ev: any): void {
+    if (!ev.arrancado && ev.min_workers) {
+      this.esperando.set({
+        activo: true,
+        conectados: (ev.workers ?? []).length,
+        minimo: ev.min_workers,
+      });
+    } else {
+      this.esperando.set({ activo: false, conectados: 0, minimo: 0 });
+    }
     const mapa = new Map<string, NodoEstado>();
     for (const w of ev.workers ?? []) {
       mapa.set(w.nombre, this.nodoVacio(w.nombre, w.os, w.chunks_hechos));
@@ -125,6 +139,7 @@ export class GridService {
   }
 
   private chunkCompletado(ev: any): void {
+    this.esperando.set({ activo: false, conectados: 0, minimo: 0 });
     const mapa = new Map(this.nodos());
     const nodo = mapa.get(ev.nombre);
     if (nodo) {

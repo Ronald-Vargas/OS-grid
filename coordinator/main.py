@@ -51,6 +51,10 @@ NUM_CHUNKS = 12           # partido en 12 pedazos (cada uno tarda ~1-3s,
                           # suficiente para capturar varias lecturas de métricas)
 TAM_CHUNK = RANGO_TOTAL // NUM_CHUNKS
 
+# Cuántos workers deben conectarse antes de que empiece la misión.
+# Cambialo a 1 si querés probar en solitario.
+MIN_WORKERS = 3
+
 
 def construir_cola():
     """Genera la lista de chunks como rangos (inicio, fin)."""
@@ -85,6 +89,8 @@ class Estado:
         self.total_chunks = len(self.cola)
         self.corrida_id = None          # id de la corrida en la base de datos
         self.dashboards = []            # WebSockets de dashboards conectados
+        # Evento que se dispara cuando llegaron suficientes workers.
+        self.arranque = asyncio.Event()
 
     async def broadcast(self, evento: dict):
         """
@@ -162,7 +168,21 @@ async def ws(websocket: WebSocket):
                     "ram_total_mb": data.get("ram_total_mb"),
                     "chunks_totales": estado.total_chunks,
                 })
-                # Le mandamos su primer chunk de inmediato.
+                # Esperar a que se conecten todos los workers antes de arrancar.
+                n = len(estado.workers)
+                faltantes = MIN_WORKERS - n
+                print(f"[COORD] Workers conectados: {n}/{MIN_WORKERS}")
+                await estado.broadcast({
+                    "type": "waiting",
+                    "conectados": n,
+                    "minimo": MIN_WORKERS,
+                    "faltantes": faltantes,
+                })
+                if n >= MIN_WORKERS and not estado.arranque.is_set():
+                    print("[COORD] ¡Todos los workers listos! Arrancando misión...")
+                    estado.arranque.set()
+                # Esperar el disparo (si ya está seteado, pasa inmediatamente)
+                await estado.arranque.wait()
                 await asignar(websocket, nombre)
 
             # --- METRICS: lectura de CPU/RAM en vivo mientras procesa ---
@@ -299,6 +319,8 @@ async def ws_dashboard(websocket: WebSocket):
             "objetivo": OBJETIVO,
             "chunks_totales": estado.total_chunks,
             "completados": len(estado.resultados),
+            "min_workers": MIN_WORKERS,
+            "arrancado": estado.arranque.is_set(),
             "workers": [
                 {"nombre": n, "os": info["os"], "cpu": info["cpu"],
                  "chunks_hechos": info["chunks_hechos"]}
