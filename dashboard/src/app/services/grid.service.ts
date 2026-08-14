@@ -1,48 +1,29 @@
 import { Injectable, signal } from '@angular/core';
 
 export interface NodoEstado {
-  nombre: string;
-  os: string;
-  cpuProc: number;
-  cpuSys: number;
-  ramMb: number;
-  chunksHechos: number;
-  activo: boolean;
-  historialCpu: number[];
+  nombre: string; os: string;
+  cpuProc: number; cpuSys: number; ramMb: number;
+  chunksHechos: number; activo: boolean; historialCpu: number[];
 }
-
 export interface FilaSO {
-  so: string;
-  chunks: number;
-  tiempoProm: number;
-  cpuProm: number;
-  ramProm: number;
+  so: string; chunks: number; tiempoProm: number; cpuProm: number; ramProm: number;
 }
-
 export interface EstadoMision {
-  completa: boolean;
-  encontrado: number | null;
-  porSo: FilaSO[];
-  completados: number;
-  total: number;
+  completa: boolean; encontrado: number | null; porSo: FilaSO[];
+  completados: number; total: number;
 }
-
 export interface EventoLog {
-  hora: string;
-  texto: string;
-  tipo: 'info' | 'chunk' | 'metric' | 'done' | 'join';
+  hora: string; texto: string; tipo: 'info' | 'chunk' | 'metric' | 'done' | 'join';
 }
 
 @Injectable({ providedIn: 'root' })
 export class GridService {
-  readonly nodos    = signal<Map<string, NodoEstado>>(new Map());
-  readonly conectado = signal(false);
-  readonly mision   = signal<EstadoMision>({
-    completa: false, encontrado: null, porSo: [],
-    completados: 0, total: 0,
-  });
-  readonly esperando = signal({ activo: false, conectados: 0, minimo: 0 });
-  readonly eventos  = signal<EventoLog[]>([]);
+  readonly nodos      = signal<Map<string, NodoEstado>>(new Map());
+  readonly conectado  = signal(false);
+  readonly mision     = signal<EstadoMision>({ completa: false, encontrado: null, porSo: [], completados: 0, total: 0 });
+  readonly esperando  = signal({ activo: false, conectados: 0, minimo: 0 });
+  readonly configurando = signal(false);   // ← nuevo: panel de config visible
+  readonly eventos    = signal<EventoLog[]>([]);
 
   private ws?: WebSocket;
   private readonly MAX_HISTORIAL = 30;
@@ -59,14 +40,23 @@ export class GridService {
 
   desconectar(): void { this.ws?.close(); }
 
+  /** Envía la configuración al coordinador para iniciar la misión. */
+  arrancarMision(tipo: string, intensidad: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'start_mission', tipo, intensidad }));
+    this.configurando.set(false);
+  }
+
   private procesarEvento(ev: any): void {
     switch (ev.type) {
-      case 'snapshot':    this.aplicarSnapshot(ev); break;
-      case 'waiting':     this.esperando.set({ activo: true, conectados: ev.conectados, minimo: ev.minimo }); break;
-      case 'worker_join': this.agregarNodo(ev); break;
-      case 'metrics':     this.actualizarMetricas(ev); break;
-      case 'chunk_done':  this.chunkCompletado(ev); break;
-      case 'mission_complete': this.misionCompleta(ev); break;
+      case 'snapshot':          this.aplicarSnapshot(ev); break;
+      case 'waiting':           this.onWaiting(ev); break;
+      case 'ready_to_configure': this.onReadyToConfigure(ev); break;
+      case 'mission_starting':  this.onMissionStarting(ev); break;
+      case 'worker_join':       this.agregarNodo(ev); break;
+      case 'metrics':           this.actualizarMetricas(ev); break;
+      case 'chunk_done':        this.chunkCompletado(ev); break;
+      case 'mission_complete':  this.misionCompleta(ev); break;
     }
   }
 
@@ -75,10 +65,33 @@ export class GridService {
     for (const w of ev.workers ?? []) mapa.set(w.nombre, this.nodoVacio(w.nombre, w.os, w.chunks_hechos));
     this.nodos.set(mapa);
     this.mision.update(m => ({ ...m, total: ev.chunks_totales, completados: ev.completados }));
-    if (!ev.arrancado && ev.min_workers)
-      this.esperando.set({ activo: true, conectados: (ev.workers ?? []).length, minimo: ev.min_workers });
-    else
-      this.esperando.set({ activo: false, conectados: 0, minimo: 0 });
+    const n = (ev.workers ?? []).length;
+    if (!ev.arrancado && n >= ev.min_workers) {
+      this.esperando.set({ activo: false, conectados: n, minimo: ev.min_workers });
+      this.configurando.set(true);
+    } else {
+      this.esperando.set({ activo: !ev.arrancado, conectados: n, minimo: ev.min_workers });
+    }
+  }
+
+  private onWaiting(ev: any): void {
+    this.esperando.set({ activo: true, conectados: ev.conectados, minimo: ev.minimo });
+    this.configurando.set(false);
+    this.log(`Workers conectados: ${ev.conectados}/${ev.minimo}`, 'join');
+  }
+
+  private onReadyToConfigure(ev: any): void {
+    this.esperando.set({ activo: false, conectados: ev.conectados, minimo: ev.minimo ?? 0 });
+    this.configurando.set(true);
+    // Resetear misión si era de corrida anterior
+    this.mision.set({ completa: false, encontrado: null, porSo: [], completados: 0, total: 0 });
+    this.log(`¡${ev.conectados} workers listos! Configurá la misión.`, 'join');
+  }
+
+  private onMissionStarting(ev: any): void {
+    this.configurando.set(false);
+    this.mision.update(m => ({ ...m, total: ev.chunks_totales }));
+    this.log(`Misión iniciada: ${ev.tipo} / ${ev.intensidad}`, 'info');
   }
 
   private agregarNodo(ev: any): void {
@@ -86,7 +99,6 @@ export class GridService {
     if (!mapa.has(ev.nombre)) mapa.set(ev.nombre, this.nodoVacio(ev.nombre, ev.os, 0));
     this.nodos.set(mapa);
     this.mision.update(m => ({ ...m, total: ev.chunks_totales ?? m.total }));
-    this.esperando.update(e => ({ ...e, conectados: mapa.size }));
     this.log(`${ev.nombre} (${ev.os}) conectado`, 'join');
   }
 
@@ -102,6 +114,7 @@ export class GridService {
 
   private chunkCompletado(ev: any): void {
     this.esperando.set({ activo: false, conectados: 0, minimo: 0 });
+    this.configurando.set(false);
     const mapa = new Map(this.nodos());
     const nodo = mapa.get(ev.nombre);
     if (nodo) mapa.set(ev.nombre, { ...nodo, chunksHechos: ev.chunks_hechos, activo: false });

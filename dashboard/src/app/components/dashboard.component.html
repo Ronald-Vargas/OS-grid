@@ -1,16 +1,14 @@
 <div class="app">
-  <!-- ================= BARRA SUPERIOR ================= -->
+
+  <!-- BARRA SUPERIOR -->
   <header class="topbar">
     <div class="brand">
       <span class="logo">OS&nbsp;GRID</span>
       <span class="tag">Panel de control distribuido</span>
     </div>
-
     <div class="conn">
       @if (!conectado()) {
-        <input class="host-input" [ngModel]="host()"
-               (ngModelChange)="host.set($event)"
-               placeholder="host del coordinador" />
+        <input class="host-input" [ngModel]="host()" (ngModelChange)="host.set($event)" placeholder="host del coordinador" />
         <button class="btn" (click)="conectar()">Conectar</button>
         <span class="dot off"></span><span class="conn-txt">desconectado</span>
       } @else {
@@ -19,7 +17,7 @@
     </div>
   </header>
 
-  <!-- ================= PROGRESO GLOBAL ================= -->
+  <!-- PROGRESO -->
   <section class="progress-panel">
     <div class="progress-head">
       <span class="progress-label">Progreso de la misión</span>
@@ -30,28 +28,67 @@
     </div>
   </section>
 
-  <!-- ================= PANTALLA DE ESPERA ================= -->
+  <!-- ESPERANDO WORKERS -->
   @if (esperando().activo && !mision().completa) {
     <section class="waiting-panel">
       <div class="waiting-icon">⏳</div>
       <div class="waiting-title">Esperando workers...</div>
-      <div class="waiting-count">
-        {{ esperando().conectados }} / {{ esperando().minimo }} equipos conectados
-      </div>
+      <div class="waiting-count">{{ esperando().conectados }} / {{ esperando().minimo }} equipos conectados</div>
       <div class="waiting-dots">
         @for (n of [1,2,3]; track n) {
           <span class="dot" [class.on]="n <= esperando().conectados"></span>
         }
       </div>
-      <div class="waiting-hint">La misión arranca automáticamente cuando se conecten todos.</div>
+      <div class="waiting-hint">La misión arranca cuando se conecten todos.</div>
     </section>
   }
 
-  <!-- ================= TARJETAS POR NODO ================= -->
+  <!-- PANEL DE CONFIGURACIÓN (reemplaza al de espera cuando están los 3) -->
+  @if (configurando()) {
+    <section class="config-panel">
+      <div class="config-header">
+        <span class="config-titulo">✓ Los {{ esperando().conectados }} nodos están conectados — Configurá la misión</span>
+      </div>
+
+      <div class="config-body">
+        <!-- Tipo de tarea -->
+        <div class="config-grupo">
+          <div class="config-label">Tipo de tarea</div>
+          <div class="config-opciones">
+            @for (t of tiposInfo; track t.id) {
+              <button class="opcion" [class.sel]="tipo() === t.id" (click)="tipo.set(t.id)">
+                <span class="op-label">{{ t.label }}</span>
+                <span class="op-desc">{{ t.desc }}</span>
+              </button>
+            }
+          </div>
+        </div>
+
+        <!-- Intensidad -->
+        <div class="config-grupo">
+          <div class="config-label">Intensidad</div>
+          <div class="config-opciones">
+            @for (i of intensidadesInfo; track i.id) {
+              <button class="opcion" [class.sel]="intensidad() === i.id" (click)="intensidad.set(i.id)">
+                <span class="op-label">{{ i.label }}</span>
+                <span class="op-desc">{{ i.desc }}</span>
+              </button>
+            }
+          </div>
+        </div>
+      </div>
+
+      <div class="config-footer">
+        <button class="btn-arrancar" (click)="arrancar()">▶ Arrancar misión</button>
+        <span class="config-hint">{{ tipo() === 'hash' ? 'SHA-256' : tipo() === 'sort' ? 'Ordenamiento' : 'Números primos' }} · {{ intensidad() }}</span>
+      </div>
+    </section>
+  }
+
+  <!-- TARJETAS POR NODO -->
   <section class="grid">
     @for (nodo of nodos(); track trackNodo($index, nodo)) {
-      <article class="card" [class.active]="nodo.activo"
-               [style.--acento]="colorSO(nodo.os)">
+      <article class="card" [class.active]="nodo.activo" [style.--acento]="colorSO(nodo.os)">
         <div class="card-head">
           <div class="node-id">
             <span class="node-chip" [style.background]="colorSO(nodo.os)"></span>
@@ -60,44 +97,25 @@
               <div class="node-os">{{ nodo.os }}</div>
             </div>
           </div>
-          <span class="node-state" [class.on]="nodo.activo">
-            {{ nodo.activo ? 'procesando' : 'en espera' }}
-          </span>
+          <span class="node-state" [class.on]="nodo.activo">{{ nodo.activo ? 'procesando' : 'en espera' }}</span>
         </div>
-
         <app-sparkline [datos]="nodo.historialCpu" [color]="colorSO(nodo.os)" />
-
         <div class="metrics">
-          <div class="metric">
-            <span class="m-label">CPU proc</span>
-            <span class="m-value">{{ nodo.cpuProc | number:'1.0-1' }}<span class="u">%</span></span>
-          </div>
-          <div class="metric">
-            <span class="m-label">CPU sys</span>
-            <span class="m-value">{{ nodo.cpuSys | number:'1.0-1' }}<span class="u">%</span></span>
-          </div>
-          <div class="metric">
-            <span class="m-label">RAM</span>
-            <span class="m-value">{{ nodo.ramMb | number:'1.0-0' }}<span class="u">MB</span></span>
-          </div>
-          <div class="metric">
-            <span class="m-label">Chunks</span>
-            <span class="m-value">{{ nodo.chunksHechos }}</span>
-          </div>
+          <div class="metric"><span class="m-label">CPU proc</span><span class="m-value">{{ nodo.cpuProc | number:'1.0-1' }}<span class="u">%</span></span></div>
+          <div class="metric"><span class="m-label">CPU sys</span><span class="m-value">{{ nodo.cpuSys | number:'1.0-1' }}<span class="u">%</span></span></div>
+          <div class="metric"><span class="m-label">RAM</span><span class="m-value">{{ nodo.ramMb | number:'1.0-0' }}<span class="u">MB</span></span></div>
+          <div class="metric"><span class="m-label">Chunks</span><span class="m-value">{{ nodo.chunksHechos }}</span></div>
         </div>
       </article>
     } @empty {
       <div class="empty">
-        @if (conectado()) {
-          Esperando a que los nodos se conecten…
-        } @else {
-          Conectate al coordinador para ver los nodos.
-        }
+        @if (conectado()) { Esperando a que los nodos se conecten… }
+        @else { Conectate al coordinador para ver los nodos. }
       </div>
     }
   </section>
 
-  <!-- ================= LEADERBOARD FINAL ================= -->
+  <!-- LEADERBOARD -->
   @if (mision().completa) {
     <section class="leaderboard">
       <div class="lb-head">
@@ -106,22 +124,13 @@
           <span class="found">Número encontrado: <b>{{ mision().encontrado }}</b></span>
         }
       </div>
-
       <table class="lb-table">
-        <thead>
-          <tr>
-            <th>#</th><th>Sistema operativo</th><th>Chunks</th>
-            <th>Tiempo prom.</th><th>CPU prom.</th><th>RAM prom.</th>
-          </tr>
-        </thead>
+        <thead><tr><th>#</th><th>Sistema operativo</th><th>Chunks</th><th>Tiempo prom.</th><th>CPU prom.</th><th>RAM prom.</th></tr></thead>
         <tbody>
           @for (fila of leaderboard(); track fila.so; let i = $index) {
             <tr [class.winner]="i === 0">
               <td class="rank">{{ iconoMedalla(i) }}</td>
-              <td>
-                <span class="so-chip" [style.background]="colorSO(fila.so)"></span>
-                {{ fila.so }}
-              </td>
+              <td><span class="so-chip" [style.background]="colorSO(fila.so)"></span>{{ fila.so }}</td>
               <td>{{ fila.chunks }}</td>
               <td>{{ fila.tiempoProm | number:'1.0-3' }} s</td>
               <td>{{ fila.cpuProm | number:'1.0-1' }} %</td>
@@ -132,4 +141,5 @@
       </table>
     </section>
   }
+
 </div>
