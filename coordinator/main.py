@@ -292,29 +292,10 @@ async def broadcast_final():
         "por_nodo": por_nodo,
         "corrida_id": estado.corrida_id,
     })
-    # Programar auto-reset para la siguiente corrida
-    asyncio.create_task(auto_reset())
-
-
-async def auto_reset():
-    """Después de 4 s reinicia el estado para la siguiente corrida."""
-    await asyncio.sleep(4)
+    # Resetear INMEDIATAMENTE para que los workers que reconecten
+    # en ~3s encuentren el arranque limpio (sin disparar).
     estado.reset()
-    print("[COORD] Estado reiniciado. Listo para nueva misión.")
-    n = len(estado.workers)
-    if n >= MIN_WORKERS:
-        await estado.broadcast({
-            "type": "ready_to_configure",
-            "conectados": n,
-            "minimo": MIN_WORKERS,
-        })
-    else:
-        await estado.broadcast({
-            "type": "waiting",
-            "conectados": n,
-            "minimo": MIN_WORKERS,
-            "faltantes": MIN_WORKERS - n,
-        })
+    print("[COORD] Estado reseteado. Esperando workers para nueva corrida.")
 
 
 def resumen_consola():
