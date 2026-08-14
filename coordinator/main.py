@@ -1,10 +1,24 @@
 """
 Coordinador de OS Grid — versión estable (Fases 1-6 + configurador)
+
+Reparto dinámico de chunks (work-stealing): cada worker arranca con un chunk y
+pide el siguiente apenas termina, así el nodo más rápido procesa más y se ve
+quién "gana".
+
+Para que la misión SIEMPRE termine, el coordinador lleva contabilidad de los
+chunks en vuelo (`asignados`) y los reencola si el worker se cae, si falla el
+envío o si se cuelga (vigilante con timeout). Antes no existía esa contabilidad:
+un solo chunk perdido dejaba la fase en "corriendo" para siempre y el sistema
+quedaba trabado hasta reiniciar el coordinador.
 """
 
 import asyncio
 import json
+import os
 import sys
+import time
+import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -40,7 +54,11 @@ CONFIGURACIONES = {
     },
 }
 
-MIN_WORKERS = 3
+# Configurables por variable de entorno (útil para pruebas locales).
+MIN_WORKERS     = int(os.getenv("OSGRID_MIN_WORKERS", "3"))
+TIMEOUT_CHUNK   = float(os.getenv("OSGRID_TIMEOUT_CHUNK", "120"))  # s sin respuesta => chunk perdido
+INTERVALO_VIGIA = float(os.getenv("OSGRID_INTERVALO_VIGIA", "5"))  # s entre revisiones del vigilante
+MAX_INTENTOS    = int(os.getenv("OSGRID_MAX_INTENTOS", "3"))       # reintentos antes de darlo por fallido
 
 
 def construir_cola(tipo: str, intensidad: str) -> list:
@@ -67,12 +85,18 @@ class Estado:
         self.intensidad   = "normal"
         self.cola         = []
         self.lock         = asyncio.Lock()
-        self.workers      = {}     # nombre -> {os, cpu, chunks_hechos, ws}
+        self.workers      = {}     # nombre -> {os, cpu, chunks_hechos, sano, ws}
         self.resultados   = []
         self.encontrado   = None
         self.total_chunks = 0
         self.corrida_id   = None
         self.dashboards   = []
+        # Chunks en vuelo: chunk_id -> {"chunk":…, "nombre":…, "desde": monotonic}
+        self.asignados    = {}
+        self.completados  = set()  # chunk_ids resueltos (evita contar duplicados)
+        self.fallidos     = set()  # chunk_ids que agotaron los reintentos
+        self.intentos     = {}     # chunk_id -> veces que se repartió
+        self.reasignados  = 0      # para el informe: cuántas veces hubo que rescatar
         # Estado global de la misión: "esperando" | "listo" | "corriendo" | "completa"
         self.fase         = "esperando"
 
@@ -87,9 +111,55 @@ class Estado:
             if d in self.dashboards:
                 self.dashboards.remove(d)
 
-    async def siguiente_chunk(self):
+    # ── contabilidad de chunks ───────────────────────────────────────────────
+
+    async def tomar_chunk(self, nombre: str):
+        """Saca el siguiente chunk pendiente y lo marca como en vuelo."""
         async with self.lock:
-            return self.cola.pop(0) if self.cola else None
+            while self.cola:
+                ch = self.cola.pop(0)
+                cid = ch["id"]
+                if cid in self.completados or cid in self.asignados:
+                    continue          # ya lo resolvió o lo está haciendo alguien
+                self.intentos[cid] = self.intentos.get(cid, 0) + 1
+                self.asignados[cid] = {"chunk": ch, "nombre": nombre,
+                                       "desde": time.monotonic()}
+                return ch
+            return None
+
+    async def reencolar(self, chunk_id: int, motivo: str) -> bool:
+        """
+        Devuelve un chunk perdido a la cola. Si ya agotó los reintentos lo marca
+        como fallido para que la misión pueda cerrar igual en vez de trabarse.
+        """
+        async with self.lock:
+            info = self.asignados.pop(chunk_id, None)
+            if info is None or chunk_id in self.completados:
+                return False
+            if self.intentos.get(chunk_id, 0) >= MAX_INTENTOS:
+                self.fallidos.add(chunk_id)
+                print(f"[COORD] ✗ chunk #{chunk_id} descartado tras "
+                      f"{MAX_INTENTOS} intentos ({motivo})")
+                return False
+            self.cola.insert(0, info["chunk"])   # prioridad: que salga ya
+            self.reasignados += 1
+            print(f"[COORD] ↻ chunk #{chunk_id} reencolado ({motivo}, "
+                  f"estaba en {info['nombre']})")
+            return True
+
+    async def liberar_worker(self, nombre: str, motivo: str) -> list:
+        """Reencola todos los chunks que tenía en vuelo un worker."""
+        pendientes = [cid for cid, i in list(self.asignados.items())
+                      if i["nombre"] == nombre]
+        for cid in pendientes:
+            await self.reencolar(cid, motivo)
+        return pendientes
+
+    def ocupados(self) -> set:
+        return {i["nombre"] for i in self.asignados.values()}
+
+    def mision_terminada(self) -> bool:
+        return len(self.completados) + len(self.fallidos) >= self.total_chunks
 
     def reset(self):
         """Deja el estado listo para una nueva corrida (mantiene workers)."""
@@ -98,14 +168,30 @@ class Estado:
         self.encontrado   = None
         self.total_chunks = 0
         self.corrida_id   = None
+        self.asignados    = {}
+        self.completados  = set()
+        self.fallidos     = set()
+        self.intentos     = {}
+        self.reasignados  = 0
         self.fase         = "listo" if len(self.workers) >= MIN_WORKERS else "esperando"
         for w in self.workers.values():
             w["chunks_hechos"] = 0
+            w["sano"] = True
 
 
 estado = Estado()
 
-app = FastAPI(title="OS Grid Coordinator")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    vigia = asyncio.create_task(vigilante())
+    try:
+        yield
+    finally:
+        vigia.cancel()
+
+
+app = FastAPI(title="OS Grid Coordinator", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -118,8 +204,23 @@ def api_status():
         "intensidad": estado.intensidad,
         "chunks_totales": estado.total_chunks,
         "chunks_restantes": len(estado.cola),
-        "workers": list(estado.workers.keys()),
+        "chunks_en_vuelo": {cid: i["nombre"] for cid, i in estado.asignados.items()},
+        "completados": sorted(estado.completados),
+        "fallidos": sorted(estado.fallidos),
+        "workers": {n: {"os": w["os"], "sano": w["sano"],
+                        "chunks_hechos": w["chunks_hechos"]}
+                    for n, w in estado.workers.items()},
     }
+
+
+@app.post("/api/abortar")
+async def api_abortar():
+    """Escotilla de emergencia: cierra la misión actual y vuelve a 'listo'."""
+    if estado.fase != "corriendo":
+        return {"ok": False, "fase": estado.fase}
+    print("[COORD] Misión abortada manualmente.")
+    await cerrar_mision()
+    return {"ok": True, "fase": estado.fase}
 
 
 # ── WebSocket de workers ─────────────────────────────────────────────────────
@@ -136,10 +237,19 @@ async def ws_worker(websocket: WebSocket):
 
             if tipo == P.REGISTER:
                 nombre = data.get("nombre", "desconocido")
+
+                # Si ese nombre ya estaba con OTRA conexión, la vieja quedó
+                # zombi: liberamos sus chunks antes de pisar el registro.
+                previo = estado.workers.get(nombre)
+                if previo is not None and previo["ws"] is not websocket:
+                    print(f"[COORD] {nombre} se reconectó — descartando sesión anterior")
+                    await estado.liberar_worker(nombre, "reconexión")
+
                 estado.workers[nombre] = {
                     "os": data.get("os"),
                     "cpu": data.get("cpu"),
-                    "chunks_hechos": 0,
+                    "chunks_hechos": previo["chunks_hechos"] if previo else 0,
+                    "sano": True,
                     "ws": websocket,
                 }
                 n = len(estado.workers)
@@ -178,66 +288,186 @@ async def ws_worker(websocket: WebSocket):
                 })
 
             elif tipo == P.RESULT:
-                cid = data.get("chunk_id")
-                hallazgo = data.get("encontrado")
-                tiempo = data.get("tiempo", 0)
-
-                estado.resultados.append(data)
-                estado.workers[nombre]["chunks_hechos"] += 1
-                if hallazgo is not None:
-                    estado.encontrado = hallazgo
-
-                so = estado.workers[nombre]["os"]
-                stats.guardar_resultado(estado.corrida_id, nombre, so, data)
-
-                print(f"[COORD] {nombre} terminó chunk #{cid} en {tiempo:.3f}s"
-                      + ("  ← ¡ENCONTRADO!" if hallazgo else ""))
-
-                await estado.broadcast({
-                    "type": "chunk_done",
-                    "nombre": nombre, "os": so, "chunk_id": cid,
-                    "tiempo": tiempo, "encontrado": hallazgo,
-                    "chunks_hechos": estado.workers[nombre]["chunks_hechos"],
-                    "completados": len(estado.resultados),
-                    "total": estado.total_chunks,
-                })
-                await asignar(websocket, nombre)
+                await recibir_resultado(websocket, nombre, data)
 
     except WebSocketDisconnect:
-        if nombre and nombre in estado.workers:
-            estado.workers.pop(nombre, None)
-            print(f"[COORD] Worker desconectado: {nombre}")
-            # Si estábamos listos pero se cayó uno, volver a esperando
-            if estado.fase == "listo" and len(estado.workers) < MIN_WORKERS:
-                estado.fase = "esperando"
-            await avisar_fase()
+        pass
+    except Exception:
+        # Una excepción suelta acá dejaba al worker como fantasma en el registro,
+        # con un WebSocket muerto al que después se le asignaban chunks.
+        print(f"[COORD] Error en la sesión de {nombre}:")
+        traceback.print_exc()
+    finally:
+        await desconectar_worker(nombre, websocket)
+
+
+async def recibir_resultado(websocket: WebSocket, nombre: str, data: dict):
+    cid      = data.get("chunk_id")
+    hallazgo = data.get("encontrado")
+    tiempo   = data.get("tiempo", 0) or 0
+    error    = data.get("error")
+
+    worker = estado.workers.get(nombre)
+    if worker is None:
+        print(f"[COORD] RESULT de un worker no registrado ({nombre}) — ignorado")
+        return
+
+    async with estado.lock:
+        estado.asignados.pop(cid, None)
+        duplicado = cid in estado.completados
+        if not duplicado:
+            estado.completados.add(cid)
+            estado.fallidos.discard(cid)
+
+    if duplicado:
+        # Llegó tarde un chunk que ya habíamos reasignado y resuelto.
+        print(f"[COORD] chunk #{cid} duplicado (de {nombre}) — ignorado")
+        await asignar(websocket, nombre)
+        return
+
+    estado.resultados.append(data)
+    worker["chunks_hechos"] += 1
+    worker["sano"] = True          # respondió: sale de cuarentena
+    if hallazgo is not None:
+        estado.encontrado = hallazgo
+
+    so = worker["os"]
+    stats.guardar_resultado(estado.corrida_id, nombre, so, data)
+
+    marca = "  ← ¡ENCONTRADO!" if hallazgo else (f"  ← ERROR: {error}" if error else "")
+    print(f"[COORD] {nombre} terminó chunk #{cid} en {tiempo:.3f}s{marca}")
+
+    await estado.broadcast({
+        "type": "chunk_done",
+        "nombre": nombre, "os": so, "chunk_id": cid,
+        "tiempo": tiempo, "encontrado": hallazgo, "error": error,
+        "chunks_hechos": worker["chunks_hechos"],
+        "completados": len(estado.completados),
+        "total": estado.total_chunks,
+    })
+    await asignar(websocket, nombre)
+
+
+async def desconectar_worker(nombre: str, websocket: WebSocket):
+    """Limpia el registro solo si el ws guardado es realmente el que se cayó."""
+    if not nombre:
+        return
+    actual = estado.workers.get(nombre)
+    if actual is None or actual["ws"] is not websocket:
+        return   # ya se reconectó con otra sesión: no tocar el registro nuevo
+
+    estado.workers.pop(nombre, None)
+    print(f"[COORD] Worker desconectado: {nombre}")
+
+    # Sus chunks en vuelo vuelven a la cola y se reparten entre los que quedan.
+    perdidos = await estado.liberar_worker(nombre, "desconexión")
+    await estado.broadcast({"type": "worker_leave", "nombre": nombre,
+                            "chunks_devueltos": perdidos})
+
+    if estado.fase == "corriendo":
+        await repartir_pendientes()
+        await revisar_fin_de_mision()
+    elif estado.fase == "listo" and len(estado.workers) < MIN_WORKERS:
+        estado.fase = "esperando"
+    await avisar_fase()
 
 
 # ── Asignación y flujo ───────────────────────────────────────────────────────
 
 async def asignar(ws: WebSocket, nombre: str):
-    chunk = await estado.siguiente_chunk()
+    chunk = await estado.tomar_chunk(nombre)
     if chunk is None:
         try:
             await ws.send_text(json.dumps(P.msg(P.NO_MORE)))
         except Exception:
             pass
-        # ¿Terminó todo?
-        if estado.fase == "corriendo" and len(estado.resultados) == estado.total_chunks:
-            estado.fase = "completa"
-            await broadcast_final()
-            # Reset inmediato para próxima corrida
-            estado.reset()
-            await avisar_fase()
+        await revisar_fin_de_mision()
+        return
+
+    try:
+        await ws.send_text(json.dumps(P.msg(
+            P.TASK_ASSIGN,
+            chunk_id=chunk["id"], tipo_tarea=chunk["tipo_tarea"],
+            inicio=chunk["inicio"], fin=chunk["fin"], tam=chunk["tam"],
+            objetivo=OBJETIVO_HASH if chunk["tipo_tarea"] == "hash" else "",
+        )))
+    except Exception as e:
+        # Antes el chunk ya estaba fuera de la cola y se perdía en silencio.
+        print(f"[COORD] Falló el envío del chunk #{chunk['id']} a {nombre}: {e}")
+        await estado.reencolar(chunk["id"], "envío fallido")
         return
 
     print(f"[COORD] → {nombre}: chunk #{chunk['id']} tipo={chunk['tipo_tarea']}")
-    await ws.send_text(json.dumps(P.msg(
-        P.TASK_ASSIGN,
-        chunk_id=chunk["id"], tipo_tarea=chunk["tipo_tarea"],
-        inicio=chunk["inicio"], fin=chunk["fin"], tam=chunk["tam"],
-        objetivo=OBJETIVO_HASH if chunk["tipo_tarea"] == "hash" else "",
-    )))
+
+
+async def repartir_pendientes():
+    """Le da trabajo a todo worker sano que esté libre y quede cola."""
+    if estado.fase != "corriendo":
+        return
+    ocupados = estado.ocupados()
+    for nombre, info in list(estado.workers.items()):
+        if not estado.cola:
+            break
+        if nombre in ocupados or not info["sano"]:
+            continue
+        await asignar(info["ws"], nombre)
+
+
+async def revisar_fin_de_mision():
+    if estado.fase == "corriendo" and estado.mision_terminada():
+        await cerrar_mision()
+
+
+async def cerrar_mision():
+    estado.fase = "completa"
+    await broadcast_final()
+    estado.reset()          # listo para la siguiente corrida
+    await avisar_fase()
+
+
+# ── Vigilante: rescata chunks de workers colgados ────────────────────────────
+
+async def vigilante():
+    """
+    Revisa periódicamente los chunks en vuelo. Si un worker no responde en
+    TIMEOUT_CHUNK segundos se asume colgado: su chunk vuelve a la cola y el
+    worker queda en cuarentena hasta que dé señales de vida.
+    """
+    while True:
+        try:
+            await asyncio.sleep(INTERVALO_VIGIA)
+            if estado.fase != "corriendo":
+                continue
+
+            ahora = time.monotonic()
+            vencidos = [(cid, i["nombre"]) for cid, i in list(estado.asignados.items())
+                        if ahora - i["desde"] > TIMEOUT_CHUNK]
+
+            for cid, quien in vencidos:
+                print(f"[COORD] ⏱ chunk #{cid} sin respuesta de {quien} "
+                      f"tras {TIMEOUT_CHUNK}s")
+                if quien in estado.workers:
+                    estado.workers[quien]["sano"] = False
+                await estado.reencolar(cid, "timeout")
+                await estado.broadcast({"type": "chunk_timeout",
+                                        "chunk_id": cid, "nombre": quien})
+
+            # Antitrabas: hay cola, nadie procesando y ningún worker sano libre.
+            if estado.cola and not estado.asignados:
+                if not any(w["sano"] for w in estado.workers.values()):
+                    print("[COORD] Ningún worker sano — se levanta la cuarentena")
+                    for w in estado.workers.values():
+                        w["sano"] = True
+
+            if vencidos or estado.cola:
+                await repartir_pendientes()
+            await revisar_fin_de_mision()
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            print("[COORD] Error en el vigilante:")
+            traceback.print_exc()
 
 
 async def avisar_fase():
@@ -266,8 +496,19 @@ async def broadcast_final():
         "encontrado": estado.encontrado,
         "por_so": por_so,
         "corrida_id": estado.corrida_id,
+        "completados": len(estado.completados),
+        "total": estado.total_chunks,
+        "fallidos": sorted(estado.fallidos),
+        "reasignados": estado.reasignados,
     })
-    print(f"[COORD] Misión #{estado.corrida_id} completa. Reset para siguiente corrida.")
+    extra = ""
+    if estado.fallidos:
+        extra += f" — chunks sin resolver: {sorted(estado.fallidos)}"
+    if estado.reasignados:
+        extra += f" — {estado.reasignados} reasignación(es)"
+    print(f"[COORD] Misión #{estado.corrida_id} completa "
+          f"({len(estado.completados)}/{estado.total_chunks}){extra}. "
+          f"Reset para siguiente corrida.")
 
 
 # ── WebSocket del dashboard ──────────────────────────────────────────────────
@@ -285,7 +526,7 @@ async def ws_dashboard(websocket: WebSocket):
         "tipo_tarea": estado.tipo_tarea,
         "intensidad": estado.intensidad,
         "chunks_totales": estado.total_chunks,
-        "completados": len(estado.resultados),
+        "completados": len(estado.completados),
         "min_workers": MIN_WORKERS,
         "workers": [
             {"nombre": n, "os": i["os"], "cpu": i["cpu"],
@@ -303,7 +544,13 @@ async def ws_dashboard(websocket: WebSocket):
                     data.get("tipo", "hash"),
                     data.get("intensidad", "normal"),
                 )
+            elif data.get("type") == "abort_mission":
+                if estado.fase == "corriendo":
+                    print("[COORD] Misión abortada desde el dashboard.")
+                    await cerrar_mision()
     except WebSocketDisconnect:
+        pass
+    finally:
         if websocket in estado.dashboards:
             estado.dashboards.remove(websocket)
         print(f"[COORD] Dashboard desconectado ({len(estado.dashboards)} activos)")
@@ -315,6 +562,7 @@ async def iniciar_mision(tipo: str, intensidad: str):
         print(f"[COORD] No se puede iniciar (fase={estado.fase})")
         return
 
+    estado.reset()
     estado.tipo_tarea = tipo
     estado.intensidad = intensidad
     estado.cola = construir_cola(tipo, intensidad)
@@ -331,11 +579,7 @@ async def iniciar_mision(tipo: str, intensidad: str):
     })
 
     # Repartir el primer chunk a cada worker
-    for nombre, info in list(estado.workers.items()):
-        try:
-            await asignar(info["ws"], nombre)
-        except Exception as e:
-            print(f"[COORD] Error al asignar a {nombre}: {e}")
+    await repartir_pendientes()
 
 
 # ── Estáticos ────────────────────────────────────────────────────────────────

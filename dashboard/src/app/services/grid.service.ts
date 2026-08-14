@@ -11,6 +11,7 @@ export interface FilaSO {
 export interface EstadoMision {
   completa: boolean; encontrado: number | null; porSo: FilaSO[];
   completados: number; total: number;
+  fallidos?: number[]; reasignados?: number;
 }
 export interface EventoLog {
   hora: string; texto: string; tipo: 'info' | 'chunk' | 'metric' | 'done' | 'join';
@@ -56,8 +57,30 @@ export class GridService {
       case 'worker_join':       this.agregarNodo(ev); break;
       case 'metrics':           this.actualizarMetricas(ev); break;
       case 'chunk_done':        this.chunkCompletado(ev); break;
+      case 'chunk_timeout':     this.chunkVencido(ev); break;
+      case 'worker_leave':      this.quitarNodo(ev); break;
       case 'mission_complete':  this.misionCompleta(ev); break;
     }
+  }
+
+  /** Un worker no respondió a tiempo: el coordinador reasignó su chunk. */
+  private chunkVencido(ev: any): void {
+    const mapa = new Map(this.nodos());
+    const nodo = mapa.get(ev.nombre);
+    if (nodo) {
+      mapa.set(ev.nombre, { ...nodo, activo: false, cpuProc: 0, cpuSys: 0 });
+      this.nodos.set(mapa);
+    }
+    this.log(`${ev.nombre} no respondió: chunk #${ev.chunk_id} reasignado`, 'info');
+  }
+
+  /** Un worker se desconectó: sus chunks vuelven a la cola. */
+  private quitarNodo(ev: any): void {
+    const mapa = new Map(this.nodos());
+    mapa.delete(ev.nombre);
+    this.nodos.set(mapa);
+    const n = (ev.chunks_devueltos ?? []).length;
+    this.log(`${ev.nombre} se desconectó${n ? ` — ${n} chunk(s) devuelto(s) a la cola` : ''}`, 'info');
   }
 
   private aplicarSnapshot(ev: any): void {
@@ -132,7 +155,11 @@ export class GridService {
     const porSo: FilaSO[] = (ev.por_so ?? []).map((f: any) => ({
       so: f.so, chunks: f.chunks, tiempoProm: f.tiempo_prom, cpuProm: f.cpu_prom, ramProm: f.ram_prom,
     }));
-    this.mision.update(m => ({ ...m, completa: true, encontrado: ev.encontrado, porSo }));
+    this.mision.update(m => ({
+      ...m, completa: true, encontrado: ev.encontrado, porSo,
+      completados: ev.completados ?? m.completados, total: ev.total ?? m.total,
+      fallidos: ev.fallidos ?? [], reasignados: ev.reasignados ?? 0,
+    }));
     const mapa = new Map(this.nodos());
     for (const [k, v] of mapa) mapa.set(k, { ...v, activo: false });
     this.nodos.set(mapa);
