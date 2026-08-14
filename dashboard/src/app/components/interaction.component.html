@@ -1,0 +1,150 @@
+<div class="shell">
+
+  <!-- ===== BARRA SUPERIOR ===== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="bz">BZ</span>
+      <span class="title">OS GRID <span class="slash">//</span> BATTLE ROYALE</span>
+      <span class="subtitle">Visualización del cómputo distribuido en tiempo real</span>
+    </div>
+    <div class="status-bar">
+      <span class="pill" [class.on]="conectado()">
+        {{ conectado() ? '● CONECTADO' : '○ DESCONECTADO' }}
+      </span>
+      @if (mision().completa) {
+        <span class="pill done">✓ MISIÓN COMPLETA</span>
+      } @else if (esperando().activo) {
+        <span class="pill wait">⏳ ESPERANDO {{ esperando().conectados }}/{{ esperando().minimo }}</span>
+      } @else if (conectado()) {
+        <span class="pill run">▶ EN PROGRESO {{ progreso() }}%</span>
+      }
+    </div>
+  </header>
+
+  <!-- ===== CUERPO ===== -->
+  <div class="body">
+
+    <!-- CANVAS PRINCIPAL -->
+    <main class="canvas">
+
+      <!-- Coordinador -->
+      <div class="coord-wrap">
+        <div class="node coord" [class.pulsing]="!mision().completa && conectado()">
+          <div class="node-dot coord-dot"></div>
+          <div class="node-title">COORDINADOR</div>
+          <div class="node-sub">Divide y reparte los chunks</div>
+          <div class="node-stat">
+            <span class="lbl">chunks</span>
+            <span class="val">{{ mision().completados }} / {{ mision().total }}</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill coord-fill" [style.width.%]="progreso()"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Líneas SVG del coordinador a los workers -->
+      <div class="lines-wrap">
+        <svg width="100%" height="60" class="lines-svg">
+          @for (nodo of nodos(); track nodo.nombre) {
+            <line
+              [attr.x1]="'50%'"
+              [attr.y1]="0"
+              [attr.x2]="'50%'"
+              [attr.y2]="60"
+              [attr.stroke]="colorSO(nodo.os)"
+              [class.active-line]="nodo.activo"
+              stroke-width="2"
+              stroke-opacity="0.6"/>
+          }
+        </svg>
+      </div>
+
+      <!-- Nodos workers -->
+      <div class="workers-row">
+        @for (nodo of nodos(); track trackNodo($index, nodo)) {
+          <div class="node worker" [class.active]="nodo.activo" [class.done]="mision().completa"
+               [style.--c]="colorSO(nodo.os)">
+            <div class="node-dot" [style.background]="colorSO(nodo.os)"></div>
+            <div class="node-title">{{ nodo.nombre.toUpperCase() }}</div>
+            <div class="node-sub">{{ nodo.os }} · {{ schedulerSO(nodo.os) }}</div>
+
+            <div class="metrics-grid">
+              <div class="m-row">
+                <span class="lbl">CPU proc</span>
+                <div class="bar-wrap">
+                  <div class="bar-fill" [style.width.%]="nodo.cpuProc" [style.background]="colorSO(nodo.os)"></div>
+                </div>
+                <span class="val">{{ nodo.cpuProc | number:'1.0-1' }}%</span>
+              </div>
+              <div class="m-row">
+                <span class="lbl">RAM</span>
+                <div class="bar-wrap">
+                  <div class="bar-fill ram" [style.width.%]="(nodo.ramMb / 512) * 100" [style.background]="colorSO(nodo.os)"></div>
+                </div>
+                <span class="val">{{ nodo.ramMb | number:'1.0-0' }} MB</span>
+              </div>
+              <div class="m-row">
+                <span class="lbl">Chunks</span>
+                <div class="bar-wrap">
+                  <div class="bar-fill" [style.width.%]="mision().total ? (nodo.chunksHechos / mision().total) * 100 : 0"
+                       [style.background]="colorSO(nodo.os)"></div>
+                </div>
+                <span class="val">{{ nodo.chunksHechos }}</span>
+              </div>
+            </div>
+
+            <div class="node-status" [class.on]="nodo.activo">
+              {{ nodo.activo ? 'PROCESANDO...' : (mision().completa ? 'FINALIZADO' : 'EN ESPERA...') }}
+            </div>
+          </div>
+        }
+
+        @if (nodos().length === 0) {
+          <div class="empty-workers">
+            Esperando workers...
+          </div>
+        }
+      </div>
+
+      <!-- Leaderboard final -->
+      @if (mision().completa) {
+        <div class="leaderboard">
+          <div class="lb-title">▸ RESULTADO DE LA MISIÓN · Número: <span class="found">{{ mision().encontrado }}</span></div>
+          <table class="lb-table">
+            <thead><tr><th>#</th><th>Sistema operativo</th><th>Chunks</th><th>Tiempo prom.</th><th>CPU prom.</th></tr></thead>
+            <tbody>
+              @for (fila of leaderboard(); track fila.so; let i = $index) {
+                <tr [class.winner]="i === 0">
+                  <td>{{ i + 1 }}</td>
+                  <td><span class="so-dot" [style.background]="colorSO(fila.so)"></span>{{ fila.so }}</td>
+                  <td>{{ fila.chunks }}</td>
+                  <td>{{ fila.tiempoProm | number:'1.0-3' }} s</td>
+                  <td>{{ fila.cpuProm | number:'1.0-1' }} %</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+
+    </main>
+
+    <!-- CONSOLA DE EVENTOS -->
+    <aside class="console">
+      <div class="console-header">● CONSOLA DE EVENTOS</div>
+      <div class="console-body">
+        @for (ev of eventos(); track $index) {
+          <div class="ev-row" [class]="'ev-' + ev.tipo">
+            <span class="ev-hora">[{{ ev.hora }}]</span>
+            <span class="ev-txt">{{ ev.texto }}</span>
+          </div>
+        }
+        @if (eventos().length === 0) {
+          <div class="ev-row ev-info">Sistema listo. Conectate al coordinador.</div>
+        }
+      </div>
+    </aside>
+
+  </div>
+</div>
