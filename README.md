@@ -67,6 +67,36 @@ Con el coordinador corriendo, abrí en el navegador o con curl:
 curl http://localhost:8000/
 ```
 
+## Prueba pesada (3 chunks)
+
+Además de la corrida original (12 chunks livianos, ~1-3s cada uno), hay una
+segunda configuración independiente con solo 3 chunks mucho más pesados
+(~15.000.000 de números cada uno, ~24s de cómputo), para que la carga
+sostenida por máquina sea mayor y la diferencia de rendimiento entre
+Linux/macOS/Windows se note más.
+
+Vive en archivos separados (`coordinator/main_pesado.py`,
+`coordinator/stats_pesado.py`, `coordinator/ver_datos_pesado.py`) que no
+tocan ni afectan la prueba original, y guarda sus resultados en una base de
+datos aparte (`os_grid_pesado.db`).
+
+**Lo único que cambia es el comando del coordinador** (mismo host, mismo
+puerto 8000):
+
+```bash
+uvicorn coordinator.main_pesado:app --host 0.0.0.0 --port 8000
+```
+
+Los workers en las otras máquinas se conectan exactamente igual que siempre
+(`python agent.py <IP-del-coordinador> <Nombre>`), sin ningún cambio,
+porque hablan el mismo protocolo por el mismo puerto.
+
+Como ambas versiones usan el puerto 8000, no corren al mismo tiempo en la
+misma máquina: hay que parar una (Ctrl+C) antes de levantar la otra.
+
+Para probar en localhost antes de la corrida real: `./run_local_pesado.sh`.
+Para ver los resultados guardados: `python -m coordinator.ver_datos_pesado`.
+
 ## Cómo conectar los otros equipos (más adelante)
 
 El mismo `agent.py` corre en macOS y Windows. Solo necesitan:
