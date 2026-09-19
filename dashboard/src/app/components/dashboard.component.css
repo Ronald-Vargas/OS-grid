@@ -142,6 +142,24 @@
   margin-right: 6px;
 }
 
+/* ---------- marcador acumulado ---------- */
+.leaderboard.acumulado { margin-top: 16px; border-top: 3px solid #f59e0b; }
+.lb-nota {
+  font-size: 12px; color: var(--texto-suave); font-family: var(--mono);
+}
+.lb-nota.alerta { color: #b45309; }
+.lb-head { flex-wrap: wrap; gap: 10px; }
+.lb-sub {
+  font-size: 12px; font-weight: 600; color: var(--texto-suave);
+  text-transform: uppercase; letter-spacing: .5px; margin: 20px 0 8px;
+}
+.lb-table.compacta td, .lb-table.compacta th { padding: 7px 10px; font-size: 13px; }
+.lb-table td.destacado { font-weight: 700; color: #b45309; }
+.leaderboard.acumulado .lb-table tr.winner td { background: rgba(245,158,11,.07); }
+.lb-pie {
+  margin-top: 12px; font-size: 11px; color: var(--texto-suave); font-style: italic;
+}
+
 @media (max-width: 640px) {
   .topbar { flex-direction: column; gap: 12px; align-items: stretch; }
   .metrics { grid-template-columns: repeat(2, 1fr); }

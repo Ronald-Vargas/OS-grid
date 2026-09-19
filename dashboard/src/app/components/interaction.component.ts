@@ -26,6 +26,21 @@ export class InteractionComponent {
     [...this.mision().porSo].sort((a, b) => a.tiempoProm - b.tiempoProm)
   );
 
+  /** Ganador de la misión actual: menor tiempo promedio por chunk. */
+  readonly ganador = computed(() => this.leaderboard()[0] ?? null);
+
+  /** Tabla de posiciones acumulada de todas las corridas. */
+  readonly acumulado = computed(() =>
+    [...this.grid.acumulado()].sort(
+      (a, b) => (b.victorias - a.victorias) || (a.tiempoProm - b.tiempoProm)
+    )
+  );
+  readonly campeon = computed(() => this.acumulado()[0] ?? null);
+  readonly totalCorridas = computed(() =>
+    this.acumulado().reduce((max, f) => Math.max(max, f.corridas), 0)
+  );
+  medalla(i: number): string { return ['🥇', '🥈', '🥉'][i] ?? `${i + 1}`; }
+
   readonly progreso = computed(() => {
     const m = this.mision();
     return m.total ? Math.round((m.completados / m.total) * 100) : 0;

@@ -123,6 +123,12 @@
         @if (mision().encontrado !== null) {
           <span class="found">Número encontrado: <b>{{ mision().encontrado }}</b></span>
         }
+        @if (mision().reasignados) {
+          <span class="lb-nota">{{ mision().reasignados }} chunk(s) reasignado(s)</span>
+        }
+        @if (mision().fallidos?.length) {
+          <span class="lb-nota alerta">sin resolver: {{ mision().fallidos?.join(', ') }}</span>
+        }
       </div>
       <table class="lb-table">
         <thead><tr><th>#</th><th>Sistema operativo</th><th>Chunks</th><th>Tiempo prom.</th><th>CPU prom.</th><th>RAM prom.</th></tr></thead>
@@ -139,6 +145,61 @@
           }
         </tbody>
       </table>
+
+      <!-- Reparto por nodo de ESTA misión -->
+      @if (mision().porNodo.length) {
+        <h3 class="lb-sub">Reparto por nodo</h3>
+        <table class="lb-table compacta">
+          <thead><tr><th>Nodo</th><th>SO</th><th>Chunks</th><th>% del total</th></tr></thead>
+          <tbody>
+            @for (n of mision().porNodo; track n.nombre) {
+              <tr>
+                <td><span class="so-chip" [style.background]="colorSO(n.os)"></span>{{ n.nombre }}</td>
+                <td>{{ n.os }}</td>
+                <td>{{ n.chunks }}</td>
+                <td>{{ mision().total ? (n.chunks / mision().total * 100 | number:'1.0-1') : 0 }} %</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
+    </section>
+  }
+
+  <!-- MARCADOR ACUMULADO (todas las corridas guardadas) -->
+  @if (acumulado().length) {
+    <section class="leaderboard acumulado">
+      <div class="lb-head">
+        <h2>Marcador acumulado</h2>
+        <span class="lb-nota">{{ totalCorridas() }} misiones registradas</span>
+        @if (campeon(); as c) {
+          <span class="found">Campeón: <b>{{ c.so }}</b> ({{ c.victorias }} victoria(s))</span>
+        }
+      </div>
+      <table class="lb-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Sistema operativo</th><th>Victorias</th><th>Chunks</th>
+            <th>Tiempo prom.</th><th>Mejor tiempo</th><th>CPU prom.</th><th>RAM prom.</th><th>Hallazgos</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (fila of acumulado(); track fila.so; let i = $index) {
+            <tr [class.winner]="i === 0">
+              <td class="rank">{{ iconoMedalla(i) }}</td>
+              <td><span class="so-chip" [style.background]="colorSO(fila.so)"></span>{{ fila.so }}</td>
+              <td class="destacado">{{ fila.victorias }}</td>
+              <td>{{ fila.chunks }}</td>
+              <td>{{ fila.tiempoProm | number:'1.0-3' }} s</td>
+              <td>{{ fila.tiempoMejor | number:'1.0-3' }} s</td>
+              <td>{{ fila.cpuProm | number:'1.0-1' }} %</td>
+              <td>{{ fila.ramProm | number:'1.0-1' }} MB</td>
+              <td>{{ fila.hallazgos }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+      <div class="lb-pie">Gana la misión el SO con menor tiempo promedio por chunk.</div>
     </section>
   }
 

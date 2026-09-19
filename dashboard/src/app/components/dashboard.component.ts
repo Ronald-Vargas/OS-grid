@@ -51,6 +51,17 @@ export class DashboardComponent {
     [...this.mision().porSo].sort((a, b) => a.tiempoProm - b.tiempoProm)
   );
 
+  /** Marcador acumulado de todas las corridas: primero el que más misiones ganó. */
+  readonly acumulado = computed(() =>
+    [...this.grid.acumulado()].sort(
+      (a, b) => (b.victorias - a.victorias) || (a.tiempoProm - b.tiempoProm)
+    )
+  );
+  readonly campeon = computed(() => this.acumulado()[0] ?? null);
+  readonly totalCorridas = computed(() =>
+    this.acumulado().reduce((max, f) => Math.max(max, f.corridas), 0)
+  );
+
   conectar(): void  { this.grid.conectar(this.host()); }
   colorSO(os: string): string { return this.grid.colorSO(os); }
   iconoMedalla(i: number): string { return ['1', '2', '3'][i] ?? `${i + 1}`; }

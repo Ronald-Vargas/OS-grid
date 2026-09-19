@@ -8,8 +8,18 @@ export interface NodoEstado {
 export interface FilaSO {
   so: string; chunks: number; tiempoProm: number; cpuProm: number; ramProm: number;
 }
+export interface FilaNodo {
+  nombre: string; os: string; chunks: number;
+}
+/** Fila del marcador acumulado (todas las corridas guardadas en SQLite). */
+export interface FilaAcumulada {
+  so: string; chunks: number; corridas: number;
+  tiempoProm: number; tiempoMejor: number; tiempoTotal: number;
+  cpuProm: number; ramProm: number; hallazgos: number; victorias: number;
+}
 export interface EstadoMision {
   completa: boolean; encontrado: number | null; porSo: FilaSO[];
+  porNodo: FilaNodo[];
   completados: number; total: number;
   fallidos?: number[]; reasignados?: number;
 }
@@ -21,10 +31,12 @@ export interface EventoLog {
 export class GridService {
   readonly nodos      = signal<Map<string, NodoEstado>>(new Map());
   readonly conectado  = signal(false);
-  readonly mision     = signal<EstadoMision>({ completa: false, encontrado: null, porSo: [], completados: 0, total: 0 });
+  readonly mision     = signal<EstadoMision>({ completa: false, encontrado: null, porSo: [], porNodo: [], completados: 0, total: 0 });
   readonly esperando  = signal({ activo: false, conectados: 0, minimo: 0 });
   readonly configurando = signal(false);   // ← nuevo: panel de config visible
   readonly eventos    = signal<EventoLog[]>([]);
+  /** Marcador acumulado de TODAS las corridas. Persiste entre misiones. */
+  readonly acumulado  = signal<FilaAcumulada[]>([]);
 
   private ws?: WebSocket;
   private readonly MAX_HISTORIAL = 30;
@@ -88,6 +100,7 @@ export class GridService {
     for (const w of ev.workers ?? []) mapa.set(w.nombre, this.nodoVacio(w.nombre, w.os, w.chunks_hechos));
     this.nodos.set(mapa);
     this.mision.update(m => ({ ...m, total: ev.chunks_totales, completados: ev.completados }));
+    this.aplicarAcumulado(ev.acumulado);
     const n = (ev.workers ?? []).length;
     const fase = ev.fase ?? "esperando";
     if (fase === "listo") {
@@ -111,14 +124,22 @@ export class GridService {
   private onReadyToConfigure(ev: any): void {
     this.esperando.set({ activo: false, conectados: ev.conectados, minimo: ev.minimo ?? 0 });
     this.configurando.set(true);
-    // Resetear misión si era de corrida anterior
-    this.mision.set({ completa: false, encontrado: null, porSo: [], completados: 0, total: 0 });
+    // OJO: acá NO se borra la misión. El coordinador manda 'ready_to_configure'
+    // apenas termina una corrida, así que borrarla acá hacía desaparecer la
+    // tabla de resultados a los milisegundos de aparecer. Los resultados se
+    // limpian recién al arrancar la misión siguiente (onMissionStarting).
     this.log(`¡${ev.conectados} workers listos! Configurá la misión.`, 'join');
   }
 
   private onMissionStarting(ev: any): void {
     this.configurando.set(false);
-    this.mision.update(m => ({ ...m, total: ev.chunks_totales }));
+    // Acá sí: empieza una corrida nueva, se limpian los resultados de la anterior.
+    this.mision.set({ completa: false, encontrado: null, porSo: [], porNodo: [],
+                      completados: 0, total: ev.chunks_totales,
+                      fallidos: [], reasignados: 0 });
+    const mapa = new Map(this.nodos());
+    for (const [k, v] of mapa) mapa.set(k, { ...v, chunksHechos: 0, historialCpu: [] });
+    this.nodos.set(mapa);
     this.log(`Misión iniciada: ${ev.tipo} / ${ev.intensidad}`, 'info');
   }
 
@@ -155,15 +176,33 @@ export class GridService {
     const porSo: FilaSO[] = (ev.por_so ?? []).map((f: any) => ({
       so: f.so, chunks: f.chunks, tiempoProm: f.tiempo_prom, cpuProm: f.cpu_prom, ramProm: f.ram_prom,
     }));
+    const porNodo: FilaNodo[] = (ev.por_nodo ?? []).map((f: any) => ({
+      nombre: f.nombre, os: f.os, chunks: f.chunks,
+    }));
     this.mision.update(m => ({
-      ...m, completa: true, encontrado: ev.encontrado, porSo,
+      ...m, completa: true, encontrado: ev.encontrado, porSo, porNodo,
       completados: ev.completados ?? m.completados, total: ev.total ?? m.total,
       fallidos: ev.fallidos ?? [], reasignados: ev.reasignados ?? 0,
     }));
+    this.aplicarAcumulado(ev.acumulado);
     const mapa = new Map(this.nodos());
     for (const [k, v] of mapa) mapa.set(k, { ...v, activo: false });
     this.nodos.set(mapa);
-    this.log(`¡MISIÓN COMPLETA! Número: ${ev.encontrado}`, 'done');
+    const ganador = porSo.length ? [...porSo].sort((a, b) => a.tiempoProm - b.tiempoProm)[0].so : null;
+    this.log(`¡MISIÓN COMPLETA!${ev.encontrado != null ? ` Número: ${ev.encontrado}.` : ''}`
+             + (ganador ? ` Ganó ${ganador}.` : ''), 'done');
+  }
+
+  /** Normaliza el marcador acumulado que manda el coordinador (snake_case → camelCase). */
+  private aplicarAcumulado(filas: any): void {
+    if (!Array.isArray(filas)) return;
+    this.acumulado.set(filas.map((f: any) => ({
+      so: f.so, chunks: f.chunks, corridas: f.corridas,
+      tiempoProm: f.tiempo_prom ?? 0, tiempoMejor: f.tiempo_mejor ?? 0,
+      tiempoTotal: f.tiempo_total ?? 0, cpuProm: f.cpu_prom ?? 0,
+      ramProm: f.ram_prom ?? 0, hallazgos: f.hallazgos ?? 0,
+      victorias: f.victorias ?? 0,
+    })));
   }
 
   private log(texto: string, tipo: EventoLog['tipo']): void {

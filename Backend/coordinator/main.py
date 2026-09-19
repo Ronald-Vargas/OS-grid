@@ -213,6 +213,12 @@ def api_status():
     }
 
 
+@app.get("/api/historico")
+def api_historico():
+    """Marcador acumulado de todas las corridas guardadas, por sistema operativo."""
+    return {"acumulado": stats.resumen_global()}
+
+
 @app.post("/api/abortar")
 async def api_abortar():
     """Escotilla de emergencia: cierra la misión actual y vuelve a 'listo'."""
@@ -491,10 +497,17 @@ async def broadcast_final():
     por_so = [{"so": so or "?", "chunks": c, "tiempo_prom": t,
                "cpu_prom": cpu, "ram_prom": ram}
               for so, c, t, cpu, ram in filas]
+    por_nodo = sorted(
+        [{"nombre": n, "os": i["os"], "chunks": i["chunks_hechos"]}
+         for n, i in estado.workers.items()],
+        key=lambda x: -x["chunks"],
+    )
     await estado.broadcast({
         "type": "mission_complete",
         "encontrado": estado.encontrado,
         "por_so": por_so,
+        "por_nodo": por_nodo,
+        "acumulado": stats.resumen_global(),   # marcador histórico
         "corrida_id": estado.corrida_id,
         "completados": len(estado.completados),
         "total": estado.total_chunks,
@@ -528,6 +541,7 @@ async def ws_dashboard(websocket: WebSocket):
         "chunks_totales": estado.total_chunks,
         "completados": len(estado.completados),
         "min_workers": MIN_WORKERS,
+        "acumulado": stats.resumen_global(),   # el marcador ya está al abrir
         "workers": [
             {"nombre": n, "os": i["os"], "cpu": i["cpu"],
              "chunks_hechos": i["chunks_hechos"]}

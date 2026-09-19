@@ -102,6 +102,29 @@
 .lb-table tr.winner td { color: #f59e0b; }
 .so-dot      { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 
+/* ---- cartel del ganador ---- */
+.winner-banner {
+  width: 100%; max-width: 700px; margin-top: 18px;
+  display: flex; align-items: center; gap: 16px;
+  padding: 16px 20px; border-radius: 10px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--c) 22%, transparent), transparent);
+  border: 1px solid var(--c);
+  animation: aparecer .45s ease-out;
+}
+@keyframes aparecer {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.wb-crown  { font-size: 34px; line-height: 1; }
+.wb-label  { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); }
+.wb-so     { font-size: 22px; font-weight: 800; color: var(--c); line-height: 1.2; }
+.wb-stats  { font-size: 11px; color: var(--muted); }
+
+/* ---- tabla de posiciones acumulada ---- */
+.leaderboard.acumulado { border-color: #f59e0b; }
+.leaderboard.acumulado .lb-table tr.winner td { color: #f59e0b; font-weight: 700; }
+.lb-table td.victorias { color: #f59e0b; font-weight: 700; }
+
 /* ---- consola ---- */
 .console {
   width: 280px; flex-shrink: 0; display: flex; flex-direction: column;

@@ -128,3 +128,66 @@ def resumen_por_so(corrida_id: int) -> list:
     """, (corrida_id,)).fetchall()
     con.close()
     return filas
+
+
+# ── Acumulado histórico (tabla de posiciones del "battle royale") ────────────
+
+def resumen_global() -> list:
+    """
+    Igual que resumen_por_so pero sumando TODAS las corridas guardadas.
+    Es el marcador acumulado: cuánto trabajo lleva hecho cada SO en total.
+
+    Devuelve una lista de dicts (no tuplas) porque va directo al dashboard.
+    """
+    con = conectar()
+    filas = con.execute("""
+        SELECT so,
+               COUNT(*)                      AS chunks,
+               COUNT(DISTINCT corrida_id)    AS corridas,
+               ROUND(AVG(tiempo), 3)         AS tiempo_prom,
+               ROUND(MIN(tiempo), 3)         AS tiempo_mejor,
+               ROUND(SUM(tiempo), 2)         AS tiempo_total,
+               ROUND(AVG(pico_cpu_proc), 1)  AS cpu_prom,
+               ROUND(AVG(pico_ram_mb), 1)    AS ram_prom,
+               SUM(CASE WHEN encontrado IS NOT NULL THEN 1 ELSE 0 END) AS hallazgos
+        FROM resultados
+        WHERE so IS NOT NULL
+        GROUP BY so
+        ORDER BY tiempo_prom ASC
+    """).fetchall()
+    con.close()
+
+    victorias = corridas_ganadas()
+    return [{"so": so or "?", "chunks": ch, "corridas": co,
+             "tiempo_prom": tp, "tiempo_mejor": tm, "tiempo_total": tt,
+             "cpu_prom": cpu, "ram_prom": ram, "hallazgos": hal,
+             "victorias": victorias.get(so, 0)}
+            for so, ch, co, tp, tm, tt, cpu, ram, hal in filas]
+
+
+def corridas_ganadas() -> dict:
+    """
+    Cuenta cuántas misiones ganó cada SO. Gana el que tuvo el menor tiempo
+    promedio por chunk en esa corrida (a igualdad, el que hizo más chunks).
+    Solo cuentan las corridas en las que compitió más de un SO.
+    """
+    con = conectar()
+    filas = con.execute("""
+        SELECT corrida_id, so, AVG(tiempo) AS t, COUNT(*) AS n
+        FROM resultados
+        WHERE so IS NOT NULL AND tiempo IS NOT NULL
+        GROUP BY corrida_id, so
+    """).fetchall()
+    con.close()
+
+    por_corrida = {}
+    for cid, so, t, n in filas:
+        por_corrida.setdefault(cid, []).append((t, -n, so))
+
+    victorias = {}
+    for cid, competidores in por_corrida.items():
+        if len(competidores) < 2:
+            continue                      # corrió un solo SO: no hay duelo
+        ganador = min(competidores)[2]
+        victorias[ganador] = victorias.get(ganador, 0) + 1
+    return victorias

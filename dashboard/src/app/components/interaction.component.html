@@ -109,17 +109,67 @@
 
       <!-- Leaderboard final -->
       @if (mision().completa) {
+        <!-- Cartel del ganador -->
+        @if (ganador(); as g) {
+          <div class="winner-banner" [style.--c]="colorSO(g.so)">
+            <div class="wb-crown">🏆</div>
+            <div class="wb-text">
+              <div class="wb-label">GANADOR DE LA MISIÓN</div>
+              <div class="wb-so">{{ g.so }}</div>
+              <div class="wb-stats">
+                {{ g.chunks }} chunks · {{ g.tiempoProm | number:'1.0-3' }}s por chunk
+              </div>
+            </div>
+          </div>
+        }
+
         <div class="leaderboard">
-          <div class="lb-title">▸ RESULTADO DE LA MISIÓN · Número: <span class="found">{{ mision().encontrado }}</span></div>
+          <div class="lb-title">
+            ▸ RESULTADO DE LA MISIÓN
+            @if (mision().encontrado !== null) {
+              · Número: <span class="found">{{ mision().encontrado }}</span>
+            }
+          </div>
           <table class="lb-table">
             <thead><tr><th>#</th><th>Sistema operativo</th><th>Chunks</th><th>Tiempo prom.</th><th>CPU prom.</th></tr></thead>
             <tbody>
               @for (fila of leaderboard(); track fila.so; let i = $index) {
                 <tr [class.winner]="i === 0">
-                  <td>{{ i + 1 }}</td>
+                  <td>{{ medalla(i) }}</td>
                   <td><span class="so-dot" [style.background]="colorSO(fila.so)"></span>{{ fila.so }}</td>
                   <td>{{ fila.chunks }}</td>
                   <td>{{ fila.tiempoProm | number:'1.0-3' }} s</td>
+                  <td>{{ fila.cpuProm | number:'1.0-1' }} %</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+
+      <!-- Tabla de posiciones acumulada -->
+      @if (acumulado().length) {
+        <div class="leaderboard acumulado">
+          <div class="lb-title">
+            ▸ TABLA DE POSICIONES · {{ totalCorridas() }} misiones
+            @if (campeon(); as c) {
+              · Campeón: <span class="found">{{ c.so }}</span>
+            }
+          </div>
+          <table class="lb-table">
+            <thead>
+              <tr><th>#</th><th>Sistema operativo</th><th>Victorias</th><th>Chunks</th>
+                  <th>Tiempo prom.</th><th>Mejor</th><th>CPU prom.</th></tr>
+            </thead>
+            <tbody>
+              @for (fila of acumulado(); track fila.so; let i = $index) {
+                <tr [class.winner]="i === 0">
+                  <td>{{ medalla(i) }}</td>
+                  <td><span class="so-dot" [style.background]="colorSO(fila.so)"></span>{{ fila.so }}</td>
+                  <td class="victorias">{{ fila.victorias }}</td>
+                  <td>{{ fila.chunks }}</td>
+                  <td>{{ fila.tiempoProm | number:'1.0-3' }} s</td>
+                  <td>{{ fila.tiempoMejor | number:'1.0-3' }} s</td>
                   <td>{{ fila.cpuProm | number:'1.0-1' }} %</td>
                 </tr>
               }
